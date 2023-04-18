@@ -60,6 +60,7 @@ BEGIN
 
             WHILE @CurrentTime >= @StartTime AND @CurrentTime <= @EndTime AND @DeletedRows > 0
             BEGIN
+                SET @DynamicSQL = N'';
                 IF @ForceCascade
                     BEGIN
                     -- force on delete cascade
@@ -68,7 +69,7 @@ BEGIN
                         N'    FROM sys.foreign_key_columns F' +
                         N'    JOIN sys.tables T ON T.object_id = F.referenced_object_id' +
                         N'    JOIN sys.columns C ON C.object_id = F.referenced_object_id AND C.column_id = F.referenced_column_id' +
-                        N'    WHERE OBJECT_NAME(F.parent_object_id) = ''' + @tableName + N''' UNION ALL' +
+                        N'    WHERE OBJECT_NAME(F.parent_object_id) = ''' + @TableName + N''' UNION ALL' +
                         N'    SELECT T.Name AS TableName, C.Name AS ColumnName' +
                         N'    FROM DeleteCascade DC' +
                         N'    JOIN sys.foreign_key_columns F ON F.referenced_object_id = OBJECT_ID(DC.TableName)' +
@@ -77,21 +78,13 @@ BEGIN
                         N'    WHERE NOT EXISTS (' +
                         N'        SELECT 1 FROM DeleteCascade WHERE TableName = T.Name AND ColumnName = C.Name' +
                         N'    )' +
-                        N')' +
-                        N'DELETE TOP (' + CAST(@BatchSize AS NVARCHAR(10)) + N') FROM ' + QUOTENAME(@TableName) + 
-                        N' WHERE ' + @AdditionalQuery + N' AND ' + QUOTENAME(@DateTimeColumn) + N' < DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE());';
+                        N');';
                     END
-                ELSE
-                    BEGIN
-                    SET @DynamicSQL = N'
-                        DELETE TOP (' + CAST(@BatchSize AS NVARCHAR(10)) + N')
-                        FROM ' + QUOTENAME(@TableName) + N'
-                        WHERE ' + @AdditionalQuery + N'
-                            AND ' + QUOTENAME(@DateTimeColumn) + N' < DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE());';
-                    END
+                SET @DynamicSQL += N'
+                    DELETE TOP (' + CAST(@BatchSize AS NVARCHAR(10)) + N') FROM ' + QUOTENAME(@TableName) + 
+                    N' WHERE ' + @AdditionalQuery + N' AND ' + QUOTENAME(@DateTimeColumn) + N' < DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE());';
 
                 EXEC sp_executesql @DynamicSQL;
-
                 SET @DeletedRows = @@ROWCOUNT;
 
                 -- Wait for 5 seconds before running the next batch if at least 1 row was deleted
