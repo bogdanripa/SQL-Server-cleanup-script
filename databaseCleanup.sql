@@ -1,5 +1,5 @@
 DECLARE @DatabaseName NVARCHAR(128);
-SET @DatabaseName = N'YourDatabaseName';
+SET @DatabaseName = N'YourDatabaseName'; -- change this to match your database name
 
 USE @DatabaseName;
 GO
@@ -13,6 +13,7 @@ CREATE TABLE dbo.CleanupConfig (
     StartTime TIME NOT NULL,
     EndTime TIME NOT NULL CHECK (EndTime > StartTime),
     BatchSize INT NOT NULL CHECK (BatchSize > 0),
+    ForceCascade BOOLEAN DEFAULT true
 );
 
 CREATE TABLE dbo.CleanupLog (
@@ -26,10 +27,10 @@ CREATE TABLE dbo.CleanupLog (
 ) WITH (SCHEMABINDING);
 
 -- Insert a sample row into the CleanupConfig table
-INSERT INTO dbo.CleanupConfig (TableName, DateTimeColumn, AdditionalQuery, DaysOld, StartTime, EndTime, BatchSize)
+INSERT INTO dbo.CleanupConfig (TableName, DateTimeColumn, AdditionalQuery, DaysOld, StartTime, EndTime, BatchSize, ForceCascade)
 VALUES
-    ('dbo.QueueItems', 'ProcessedOn', 'Processed = 1', 180, '01:00:00', '04:59:00', 1000), -- delete processed queue items that are older than 180 days in batches of 1000 rows
-    ('dbo.CleanupLog', 'ExecutionTime', '', 30, '01:00:00', '04:59:00', 5000); -- delete cleanup logs that are older than 30 days in batches of 5000 rows
+    ('dbo.QueueItems', 'ProcessedOn', 'Processed = 1', 180, '01:00:00', '04:59:00', 1000, true), -- delete processed queue items that are older than 180 days in batches of 1000 rows
+    ('dbo.CleanupLog', 'ExecutionTime', 'true', 30, '01:00:00', '04:59:00', 5000, true); -- delete cleanup logs that are older than 30 days in batches of 5000 rows
 GO
 
 -- Create the cleanup stored procedure
@@ -37,18 +38,18 @@ CREATE PROCEDURE dbo.HourlyCleanupProcess
 AS
 BEGIN
     -- Cleanup process with error handling
-    DECLARE @TableName NVARCHAR(128), @DateTimeColumn NVARCHAR(128), @AdditionalQuery NVARCHAR(4000), @StartTime TIME, @EndTime TIME, @BatchSize INT, @DaysOld INT;
+    DECLARE @TableName NVARCHAR(128), @DateTimeColumn NVARCHAR(128), @AdditionalQuery NVARCHAR(4000), @StartTime TIME, @EndTime TIME, @BatchSize INT, @DaysOld INT, @ForceCascade BOOLEAN;
 
     DECLARE @DeletedRows INT, @TotalDeletedRows INT, @CurrentTime TIME;
     DECLARE @DynamicSQL NVARCHAR(MAX), @ErrorMessage NVARCHAR(4000);
 
     DECLARE ConfigCursor CURSOR FOR
-        SELECT TableName, DateTimeColumn, AdditionalQuery, StartTime, EndTime, BatchSize, DaysOld
+        SELECT TableName, DateTimeColumn, AdditionalQuery, StartTime, EndTime, BatchSize, DaysOld, ForceCascade
         FROM dbo.CleanupConfig;
 
     OPEN ConfigCursor;
 
-    FETCH NEXT FROM ConfigCursor INTO @TableName, @DateTimeColumn, @AdditionalQuery, @StartTime, @EndTime, @BatchSize, @DaysOld;
+    FETCH NEXT FROM ConfigCursor INTO @TableName, @DateTimeColumn, @AdditionalQuery, @StartTime, @EndTime, @BatchSize, @DaysOld, @ForceCascade;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
@@ -59,11 +60,35 @@ BEGIN
 
             WHILE @CurrentTime >= @StartTime AND @CurrentTime <= @EndTime AND @DeletedRows > 0
             BEGIN
-                SET @DynamicSQL = N'
-                    DELETE TOP (' + CAST(@BatchSize AS NVARCHAR(10)) + N')
-                    FROM ' + QUOTENAME(@TableName) + N'
-                    WHERE ' + @AdditionalQuery + N'
-                        AND ' + QUOTENAME(@DateTimeColumn) + N' < DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE());';
+                IF @ForceCascade
+                    BEGIN
+                    -- force on delete cascade
+                    SET @DynamicSQL += N'WITH DeleteCascade AS (' +
+                        N'    SELECT T.Name AS TableName, C.Name AS ColumnName' +
+                        N'    FROM sys.foreign_key_columns F' +
+                        N'    JOIN sys.tables T ON T.object_id = F.referenced_object_id' +
+                        N'    JOIN sys.columns C ON C.object_id = F.referenced_object_id AND C.column_id = F.referenced_column_id' +
+                        N'    WHERE OBJECT_NAME(F.parent_object_id) = ''' + @tableName + N''' UNION ALL' +
+                        N'    SELECT T.Name AS TableName, C.Name AS ColumnName' +
+                        N'    FROM DeleteCascade DC' +
+                        N'    JOIN sys.foreign_key_columns F ON F.referenced_object_id = OBJECT_ID(DC.TableName)' +
+                        N'    JOIN sys.tables T ON T.object_id = F.parent_object_id' +
+                        N'    JOIN sys.columns C ON C.object_id = F.parent_object_id AND C.column_id = F.parent_column_id' +
+                        N'    WHERE NOT EXISTS (' +
+                        N'        SELECT 1 FROM DeleteCascade WHERE TableName = T.Name AND ColumnName = C.Name' +
+                        N'    )' +
+                        N')' +
+                        N'DELETE TOP (' + CAST(@BatchSize AS NVARCHAR(10)) + N') FROM ' + QUOTENAME(@TableName) + 
+                        N' WHERE ' + @AdditionalQuery + N' AND ' + QUOTENAME(@DateTimeColumn) + N' < DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE());';
+                    END
+                ELSE
+                    BEGIN
+                    SET @DynamicSQL = N'
+                        DELETE TOP (' + CAST(@BatchSize AS NVARCHAR(10)) + N')
+                        FROM ' + QUOTENAME(@TableName) + N'
+                        WHERE ' + @AdditionalQuery + N'
+                            AND ' + QUOTENAME(@DateTimeColumn) + N' < DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE());';
+                    END
 
                 EXEC sp_executesql @DynamicSQL;
 
@@ -100,6 +125,7 @@ GO
 USE msdb;
 GO
 
+-- create the cleanup job to be called every hour
 EXEC sp_add_jobstep
     @job_name = N'HourlyCleanup',
     @step_name = N'HourlyCleanupOfOldRows',
@@ -142,6 +168,7 @@ EXEC (''USE '' + QUOTENAME(@DatabaseName) + ''; EXEC dbo.HourlyCleanupProcess;''
     @flags = 0;
 GO
 
+-- create the hourly schedule
 EXEC sp_add_jobschedule
     @job_name = N'HourlyCleanup',
     @name = N'Cleanup Every Hour',
