@@ -1,7 +1,7 @@
 DECLARE @DatabaseName NVARCHAR(128);
 SET @DatabaseName = N'YourDatabaseName'; -- change this to match your database name
 
-EXEC('USE ' + QUOTENAME(@DatabaseName) + ';');
+EXEC('USE ' + (@DatabaseName) + ';');
 GO
 
 -- Create required cleanup tables
@@ -14,7 +14,7 @@ CREATE TABLE dbo.CleanupConfig (
     StartTime TIME NOT NULL,
     EndTime TIME NOT NULL CHECK (EndTime > StartTime),
     BatchSize INT NOT NULL CHECK (BatchSize > 0),
-    ForceCascade BOOLEAN DEFAULT true
+    ForceCascade BIT DEFAULT 1
 );
 
 CREATE TABLE dbo.CleanupLog (
@@ -28,18 +28,18 @@ CREATE TABLE dbo.CleanupLog (
 -- Insert a sample row into the CleanupConfig table
 INSERT INTO dbo.CleanupConfig (TableName, IdColumn, DateTimeColumn, AdditionalQuery, DaysOld, StartTime, EndTime, BatchSize, ForceCascade)
 VALUES
-    ('[UiPath].[dbo].[QueueItems]',          'Id',    'CreationTime',          'status=3',            60,  '01:00:00', '05:00:00',  1000, true),
-    ('[UiPath].[dbo].[Logs]',                'Id',    'TimeStamp',             '1=1',                 180, '01:00:00', '05:00:00', 10000, false),
-    ('[UiPath].[dbo].[RobotLicenseLogs]',    'Id',    'EndDate',               'EndDate is not null', 60,  '01:00:00', '05:00:00', 10000, false),
-    ('[UiPath].[dbo].[TenantNotifications]', 'Id',    'CreationTime',          '1=1',                 60,  '01:00:00', '05:00:00', 10000, true),
-    ('[UiPath].[dbo].[jobs]',                'Id',    'CreationTime',          'State in (4, 5, 6)',  60,  '01:00:00', '05:00:00', 10000, false),
-    ('[UiPath].[dbo].[AuditLogs]',           'Id',    'ExecutionTime',         '1=1',                 180, '01:00:00', '05:00:00', 10000, true),
-    ('[UiPath].[dbo].[Tasks]',               'Id',    'DeletionTime',          'IsDeleted = 1',       60,  '01:00:00', '05:00:00', 10000, false),
-    ('[UiPath].[dbo].[Tasks]',               'Id',    'LastModificationTime',  'Status = 2',          60,  '01:00:00', '05:00:00', 10000, false),
-    ('[UiPath].[dbo].[Sessions]',            'Id',    'ReportingTime',         '1=1',                 180, '01:00:00', '05:00:00', 10000, true),
-    ('[UiPath].[dbo].[Ledger]',              'Id',    'CreationTime',          '1=1',                 180, '01:00:00', '05:00:00', 10000, false),
-    ('[UiPath].[dbo].[LedgerDeliveries]',    'Id',    'LastUpdatedTime',       '1=1',                 180, '01:00:00', '05:00:00', 10000, false),
-    ('[UiPath].[dbo].[CleanupLog]',          'LogID', 'ExecutionTime',         '1=1',                 30,  '01:00:00', '05:00:00',  5000, false);
+    ('[UiPath].[dbo].[QueueItems]',          'Id',    'CreationTime',          'status=3',            60,  '01:00:00', '05:00:00',  1000, 1),
+    ('[UiPath].[dbo].[Logs]',                'Id',    'TimeStamp',             '1=1',                 180, '01:00:00', '05:00:00', 10000, 0),
+    ('[UiPath].[dbo].[RobotLicenseLogs]',    'Id',    'EndDate',               'EndDate is not null', 60,  '01:00:00', '05:00:00', 10000, 0),
+    ('[UiPath].[dbo].[TenantNotifications]', 'Id',    'CreationTime',          '1=1',                 60,  '01:00:00', '05:00:00', 10000, 1),
+    ('[UiPath].[dbo].[jobs]',                'Id',    'CreationTime',          'State in (4, 5, 6)',  60,  '01:00:00', '05:00:00', 10000, 0),
+    ('[UiPath].[dbo].[AuditLogs]',           'Id',    'ExecutionTime',         '1=1',                 180, '01:00:00', '05:00:00', 10000, 1),
+    ('[UiPath].[dbo].[Tasks]',               'Id',    'DeletionTime',          'IsDeleted = 1',       60,  '01:00:00', '05:00:00', 10000, 0),
+    ('[UiPath].[dbo].[Tasks]',               'Id',    'LastModificationTime',  'Status = 2',          60,  '01:00:00', '05:00:00', 10000, 0),
+    ('[UiPath].[dbo].[Sessions]',            'Id',    'ReportingTime',         '1=1',                 180, '01:00:00', '05:00:00', 10000, 1),
+    ('[UiPath].[dbo].[Ledger]',              'Id',    'CreationTime',          '1=1',                 180, '01:00:00', '05:00:00', 10000, 0),
+    ('[UiPath].[dbo].[LedgerDeliveries]',    'Id',    'LastUpdatedTime',       '1=1',                 180, '01:00:00', '05:00:00', 10000, 0),
+    ('[UiPath].[dbo].[CleanupLog]',          'LogID', 'ExecutionTime',         '1=1',                 30,  '01:00:00', '05:00:00',  5000, 0);
 GO
 
 -- Create the cleanup stored procedure
@@ -47,7 +47,7 @@ CREATE PROCEDURE dbo.HourlyCleanupProcess
 AS
 BEGIN
     -- Cleanup process with error handling
-    DECLARE @TableName NVARCHAR(128), @IdColumn NVARCHAR(128), @DateTimeColumn NVARCHAR(128), @AdditionalQuery NVARCHAR(4000), @StartTime TIME, @EndTime TIME, @BatchSize INT, @DaysOld INT, @ForceCascade BOOLEAN;
+    DECLARE @TableName NVARCHAR(128), @IdColumn NVARCHAR(128), @DateTimeColumn NVARCHAR(128), @AdditionalQuery NVARCHAR(4000), @StartTime TIME, @EndTime TIME, @BatchSize INT, @DaysOld INT, @ForceCascade BIT;
 
     DECLARE @DeletedRows INT, @TotalDeletedRows INT, @CurrentTime TIME;
     DECLARE @DynamicSQL NVARCHAR(MAX), @ErrorMessage NVARCHAR(4000);
@@ -71,12 +71,12 @@ BEGIN
             BEGIN
                 BEGIN TRANSACTION
                 -- get the IDs to be deleted
-                    SET @DynamicSQL = N'SELECT TOP ' + CAST(@BatchSize AS NVARCHAR(10)) + N' ' + CAST(@IdColumn AS NVARCHAR(10)) + N' AS IdToDelete INTO #TempDeletedIds FROM ' + QUOTENAME(@TableName) + N' WHERE ' + @AdditionalQuery + N' AND DATEDIFF(DAY, ' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE()) > ' + CAST(@DaysOld AS NVARCHAR(10));
+                    SET @DynamicSQL = N'SELECT TOP ' + CAST(@BatchSize AS NVARCHAR(10)) + N' ' + CAST(@IdColumn AS NVARCHAR(10)) + N' AS IdToDelete INTO #TempDeletedIds FROM ' + (@TableName) + N' WHERE ' + @AdditionalQuery + N' AND DATEDIFF(DAY, ' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE()) > ' + CAST(@DaysOld AS NVARCHAR(10));
                     EXEC sp_executesql @DynamicSQL;
                     SET @DeletedRows = @@ROWCOUNT;
                     IF @DeletedRows > 0
                     BEGIN
-                        IF @ForceCascade
+                        IF @ForceCascade == 1
                         BEGIN
                             -- go one level deeper in the DB schema
                             DECLARE @FKName NVARCHAR(255);
@@ -93,7 +93,7 @@ BEGIN
 
                             WHILE @@FETCH_STATUS = 0
                             BEGIN
-                                SET @DynamicSQL = N'DELETE FROM ' + QUOTENAME(@FKTableName) + N' WHERE ' + QUOTENAME(@FKName) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
+                                SET @DynamicSQL = N'DELETE FROM ' + (@FKTableName) + N' WHERE ' + (@FKName) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
                                 EXEC sp_executesql @DynamicSQL;
                                 FETCH NEXT FROM ReferenceCursor INTO @FKName, @FKTableName;
                             END;
@@ -102,7 +102,7 @@ BEGIN
                             DEALLOCATE ReferenceCursor;
                         END
                         -- delete records
-                        SET @DynamicSQL = N'DELETE FROM ' + QUOTENAME(@TableName) + N' WHERE ' + CAST(@IdColumn AS NVARCHAR(10)) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
+                        SET @DynamicSQL = N'DELETE FROM ' + (@TableName) + N' WHERE ' + CAST(@IdColumn AS NVARCHAR(10)) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
                         EXEC sp_executesql @DynamicSQL;
                     END
                     DROP TABLE #TempDeletedIds
@@ -123,7 +123,7 @@ BEGIN
             -- Capture the error message and continue with the next iteration
             SET @ErrorMessage = ERROR_MESSAGE();
             INSERT INTO dbo.CleanupLog (TableName, DeletedRows, ExecutionTime, ErrorMessage) VALUES (@TableName, NULL, GETDATE(), @ErrorMessage);
-            PRINT 'Error while processing table ' + QUOTENAME(@TableName) + ': ' + @ErrorMessage;
+            PRINT 'Error while processing table ' + (@TableName) + ': ' + @ErrorMessage;
         END CATCH;
 
         FETCH NEXT FROM ConfigCursor INTO @TableName, @DateTimeColumn, @AdditionalQuery, @StartTime, @EndTime, @BatchSize, @DaysOld;
@@ -175,7 +175,7 @@ DECLARE @DatabaseName NVARCHAR(128);
 SET @DatabaseName = ''' + @DatabaseName + ''';
 
 -- Use dynamic SQL to switch to the desired database and execute the stored procedure
-EXEC (''USE '' + QUOTENAME(@DatabaseName) + ''; EXEC dbo.HourlyCleanupProcess;'');
+EXEC (''USE '' + (@DatabaseName) + ''; EXEC dbo.HourlyCleanupProcess;'');
 ',
     @database_name = N'msdb', -- Set the context to msdb database as we are using msdb.dbo.sysjobs and msdb.dbo.sysjobactivity
     @flags = 0;
