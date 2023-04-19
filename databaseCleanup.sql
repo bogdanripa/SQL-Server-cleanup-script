@@ -1,7 +1,7 @@
 DECLARE @DatabaseName NVARCHAR(128);
 SET @DatabaseName = N'YourDatabaseName'; -- change this to match your database name
 
-USE @DatabaseName;
+EXEC('USE ' + QUOTENAME(@DatabaseName) + ';');
 GO
 
 -- Create required cleanup tables
@@ -71,7 +71,7 @@ BEGIN
             BEGIN
                 BEGIN TRANSACTION
                 -- get the IDs to be deleted
-                    SET @DynamicSQL += N'SELECT TOP ' + CAST(@BatchSize AS NVARCHAR(10)) + N' ' + CAST(@IdColumn AS NVARCHAR(10)) + N' AS IdToDelete INTO #TempDeletedIds FROM ' + QUOTENAME(@TableName) + N' WHERE ' + @AdditionalQuery + N' AND DATEDIFF(DAY, ' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE()) > ' + CAST(@DaysOld AS NVARCHAR(10));
+                    SET @DynamicSQL = N'SELECT TOP ' + CAST(@BatchSize AS NVARCHAR(10)) + N' ' + CAST(@IdColumn AS NVARCHAR(10)) + N' AS IdToDelete INTO #TempDeletedIds FROM ' + QUOTENAME(@TableName) + N' WHERE ' + @AdditionalQuery + N' AND DATEDIFF(DAY, ' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE()) > ' + CAST(@DaysOld AS NVARCHAR(10));
                     EXEC sp_executesql @DynamicSQL;
                     SET @DeletedRows = @@ROWCOUNT;
                     IF @DeletedRows > 0
@@ -102,7 +102,7 @@ BEGIN
                             DEALLOCATE ReferenceCursor;
                         END
                         -- delete records
-                        SET @DynamicSQL += N'DELETE FROM ' + QUOTENAME(@TableName) + N' WHERE ' + CAST(@IdColumn AS NVARCHAR(10)) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
+                        SET @DynamicSQL = N'DELETE FROM ' + QUOTENAME(@TableName) + N' WHERE ' + CAST(@IdColumn AS NVARCHAR(10)) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
                         EXEC sp_executesql @DynamicSQL;
                     END
                     DROP TABLE #TempDeletedIds
