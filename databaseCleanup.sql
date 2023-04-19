@@ -1,6 +1,6 @@
 DECLARE @DatabaseName NVARCHAR(128) = DB_NAME();
 
--- Create required cleanup tables
+-- Create cleanup table config
 CREATE TABLE dbo.CleanupConfig (
     TableName NVARCHAR(128),
     IdColumn NVARCHAR(128),
@@ -13,6 +13,7 @@ CREATE TABLE dbo.CleanupConfig (
     ForceCascade BIT DEFAULT 1
 );
 
+-- Create cleanup table log
 CREATE TABLE dbo.CleanupLog (
     LogID INT IDENTITY(1,1) PRIMARY KEY,
     TableName NVARCHAR(128),
@@ -42,10 +43,10 @@ GO
 CREATE PROCEDURE dbo.HourlyCleanupProcess
 AS
 BEGIN
+    -- this is where we store the IDs to be deleted
     IF OBJECT_ID('#TempDeletedIds', 'U') IS NULL
         CREATE TABLE #TempDeletedIds (IdToDelete INT);
 
-    -- Cleanup process with error handling
     DECLARE @TableName NVARCHAR(128), @IdColumn NVARCHAR(128), @DateTimeColumn NVARCHAR(128), @AdditionalQuery NVARCHAR(4000), @StartTime TIME, @EndTime TIME, @BatchSize INT, @DaysOld INT, @ForceCascade BIT;
 
     DECLARE @DeletedRows INT, @TotalDeletedRows INT, @CurrentTime TIME;
@@ -59,6 +60,7 @@ BEGIN
 
     FETCH NEXT FROM ConfigCursor INTO @TableName, @IdColumn, @DateTimeColumn, @AdditionalQuery, @StartTime, @EndTime, @BatchSize, @DaysOld, @ForceCascade;
 
+    -- for each row in the CleanupConfig table
     WHILE @@FETCH_STATUS = 0
     BEGIN
         BEGIN TRY
@@ -66,6 +68,7 @@ BEGIN
             SET @TotalDeletedRows = 0;
             SET @CurrentTime = CAST(GETDATE() AS TIME);
 
+            -- Check to see if we should delete from this one
             WHILE @CurrentTime >= @StartTime AND @CurrentTime <= @EndTime AND @DeletedRows != 0
             BEGIN
                 BEGIN TRANSACTION
@@ -75,6 +78,8 @@ BEGIN
                     print @DynamicSQL
                     EXEC sp_executesql @DynamicSQL;
                     SET @DeletedRows = @@ROWCOUNT;
+
+                    -- check to see if there are any rows to be deleted
                     IF @DeletedRows > 0
                     BEGIN
                         IF @ForceCascade = 1
@@ -103,6 +108,7 @@ BEGIN
 
                             WHILE @@FETCH_STATUS = 0
                             BEGIN
+                                -- delete from tables following FKs
                                 SET @DynamicSQL = N'DELETE FROM ' + (@FKTableName) + N' WHERE ' + (@FKName) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
                                 print @DynamicSQL
                                 EXEC sp_executesql @DynamicSQL;
@@ -118,16 +124,17 @@ BEGIN
                         EXEC sp_executesql @DynamicSQL;
                     END
                 COMMIT TRANSACTION
-                -- Wait for 5 seconds before running the next batch if at least 1 row was deleted
+                
                 IF @DeletedRows > 0
                 BEGIN
                     SET @TotalDeletedRows = @TotalDeletedRows + @DeletedRows;
+                    -- Wait for 5 seconds before running the next batch if at least 1 row was deleted
                     WAITFOR DELAY '00:00:05';
                 END
                 SET @CurrentTime = CAST(GETDATE() AS TIME);
             END
             IF @TotalDeletedRows > 0
-                INSERT INTO dbo.CleanupLog (TableName, DeletedRows, ExecutionTime, ErrorMessage) VALUES (@TableName, @TotalDeletedRows, GETDATE(), NULL);
+                INSERT INTO dbo.CleanupLog (TableName, DeletedRows, ExecutionTime, ErrorMessage) VALUES (@TableName, @TotalDeletedRows, GETDATE(), NULL); -- log the fact that we deleted some rows
 
         END TRY
         BEGIN CATCH
@@ -146,16 +153,18 @@ BEGIN
 END;
 GO
 
+-- switch to the msdb database
 USE msdb;
 GO
 
+-- create the 'HourlyCleanup' job to be called every hour
 EXEC msdb.dbo.sp_add_job
     @job_name = N'HourlyCleanup',
     @enabled = 1,
     @description = 'Clean up the database of old records'
 GO
 
--- create the cleanup job to be called every hour
+-- create a cleanup job step (one is required)
 EXEC sp_add_jobstep
     @job_name = N'HourlyCleanup',
     @step_name = N'HourlyCleanupOfOldRows',
@@ -172,7 +181,7 @@ EXEC sp_add_jobstep
     @command = N'
 EXEC dbo.HourlyCleanupProcess
 ',
-    @database_name = @DatabaseName, -- Set the context to msdb database as we are using msdb.dbo.sysjobs and msdb.dbo.sysjobactivity
+    @database_name = @DatabaseName,
     @flags = 0;
 GO
 
@@ -193,6 +202,7 @@ EXEC sp_add_jobschedule
     @active_end_time = 235959;
 GO
 
+-- attach a job server to our job
 EXEC msdb.dbo.sp_add_jobserver
     @job_name = 'HourlyCleanup',
     @server_name = @@SERVERNAME;
