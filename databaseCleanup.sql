@@ -71,7 +71,8 @@ BEGIN
                 BEGIN TRANSACTION
                     -- get the IDs to be deleted
                     DELETE from #TempDeletedIds;
-                    SET @DynamicSQL = N'INSERT INTO #TempDeletedIds SELECT TOP ' + CAST(@BatchSize AS NVARCHAR(10)) + N' ' + CAST(@IdColumn AS NVARCHAR(10)) + N' AS IdToDelete FROM ' + (@TableName) + N' WHERE ' + @AdditionalQuery + N' AND DATEDIFF(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE()) > ' + CAST(@DateTimeColumn AS NVARCHAR(128));
+                    SET @DynamicSQL = N'INSERT INTO #TempDeletedIds SELECT TOP ' + CAST(@BatchSize AS NVARCHAR(10)) + N' ' + CAST(@IdColumn AS NVARCHAR(10)) + N' AS IdToDelete FROM ' + (@TableName) + N' WHERE ' + @AdditionalQuery + N' AND DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE()) > ' + CAST(@DateTimeColumn AS NVARCHAR(128));
+                    print @DynamicSQL
                     EXEC sp_executesql @DynamicSQL;
                     SET @DeletedRows = @@ROWCOUNT;
                     IF @DeletedRows > 0
@@ -103,6 +104,7 @@ BEGIN
                             WHILE @@FETCH_STATUS = 0
                             BEGIN
                                 SET @DynamicSQL = N'DELETE FROM ' + (@FKTableName) + N' WHERE ' + (@FKName) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
+                                print @DynamicSQL
                                 EXEC sp_executesql @DynamicSQL;
                                 FETCH NEXT FROM ReferenceCursor INTO @FKName, @FKTableName;
                             END;
@@ -112,6 +114,7 @@ BEGIN
                         END
                         -- delete records
                         SET @DynamicSQL = N'DELETE FROM ' + (@TableName) + N' WHERE ' + CAST(@IdColumn AS NVARCHAR(10)) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
+                        print @DynamicSQL
                         EXEC sp_executesql @DynamicSQL;
                     END
                 COMMIT TRANSACTION
@@ -146,6 +149,12 @@ GO
 USE msdb;
 GO
 
+EXEC msdb.dbo.sp_add_job
+    @job_name = N'HourlyCleanup',
+    @enabled = 1,
+    @description = 'Clean up the database of old records'
+GO
+
 -- create the cleanup job to be called every hour
 EXEC sp_add_jobstep
     @job_name = N'HourlyCleanup',
@@ -161,31 +170,9 @@ EXEC sp_add_jobstep
     @os_run_priority = 0,
     @subsystem = N'TSQL',
     @command = N'
-DECLARE @JobStatus INT;
-
--- Check if the job is already running
-SELECT @JobStatus = CASE WHEN EXISTS (
-    SELECT * 
-    FROM msdb.dbo.sysjobs j
-    INNER JOIN msdb.dbo.sysjobactivity ja ON j.job_id = ja.job_id
-    WHERE j.name = ''HourlyCleanup''
-        AND ja.run_requested_date IS NOT NULL
-        AND ja.stop_execution_date IS NULL
-) THEN 1 ELSE 0 END;
-
-IF @JobStatus = 1
-BEGIN
-    PRINT ''HourlyCleanup job is already running. Exiting script.'';
-    RETURN;
-END;
-
-DECLARE @DatabaseName NVARCHAR(128);
-SET @DatabaseName = ''' + @DatabaseName + ''';
-
--- Use dynamic SQL to switch to the desired database and execute the stored procedure
-EXEC (''USE '' + (@DatabaseName) + ''; EXEC dbo.HourlyCleanupProcess;'');
+EXEC dbo.HourlyCleanupProcess
 ',
-    @database_name = N'msdb', -- Set the context to msdb database as we are using msdb.dbo.sysjobs and msdb.dbo.sysjobactivity
+    @database_name = @DatabaseName, -- Set the context to msdb database as we are using msdb.dbo.sysjobs and msdb.dbo.sysjobactivity
     @flags = 0;
 GO
 
@@ -204,4 +191,9 @@ EXEC sp_add_jobschedule
     @active_end_date = 99991231,
     @active_start_time = 0, -- HHMMSS format
     @active_end_time = 235959;
+GO
+
+EXEC msdb.dbo.sp_add_jobserver
+    @job_name = 'HourlyCleanup',
+    @server_name = @@SERVERNAME;
 GO
