@@ -7,6 +7,7 @@ GO
 -- Create required cleanup tables
 CREATE TABLE dbo.CleanupConfig (
     TableName NVARCHAR(128),
+    IdColumn NVARCHAR(128),
     DateTimeColumn NVARCHAR(128),
     AdditionalQuery NVARCHAR(4000),
     DaysOld INT NOT NULL CHECK (DaysOld > 0),
@@ -19,18 +20,26 @@ CREATE TABLE dbo.CleanupConfig (
 CREATE TABLE dbo.CleanupLog (
     LogID INT IDENTITY(1,1) PRIMARY KEY,
     TableName NVARCHAR(128),
-    DateTimeColumn NVARCHAR(128),
-    AdditionalQuery NVARCHAR(4000),
     DeletedRows INT,
     ExecutionTime DATETIME,
     ErrorMessage NVARCHAR(MAX)
 ) WITH (SCHEMABINDING);
 
 -- Insert a sample row into the CleanupConfig table
-INSERT INTO dbo.CleanupConfig (TableName, DateTimeColumn, AdditionalQuery, DaysOld, StartTime, EndTime, BatchSize, ForceCascade)
+INSERT INTO dbo.CleanupConfig (TableName, IdColumn, DateTimeColumn, AdditionalQuery, DaysOld, StartTime, EndTime, BatchSize, ForceCascade)
 VALUES
-    ('dbo.QueueItems', 'ProcessedOn', 'Processed = 1', 180, '01:00:00', '04:59:00', 1000, true), -- delete processed queue items that are older than 180 days in batches of 1000 rows
-    ('dbo.CleanupLog', 'ExecutionTime', 'true', 30, '01:00:00', '04:59:00', 5000, true); -- delete cleanup logs that are older than 30 days in batches of 5000 rows
+    ('[UiPath].[dbo].[QueueItems]',          'Id',    'CreationTime',          'status=3',            60,  '01:00:00', '05:00:00',  1000, true),
+    ('[UiPath].[dbo].[Logs]',                'Id',    'TimeStamp',             '1=1',                 180, '01:00:00', '05:00:00', 10000, false),
+    ('[UiPath].[dbo].[RobotLicenseLogs]',    'Id',    'EndDate',               'EndDate is not null', 60,  '01:00:00', '05:00:00', 10000, false),
+    ('[UiPath].[dbo].[TenantNotifications]', 'Id',    'CreationTime',          '1=1',                 60,  '01:00:00', '05:00:00', 10000, true),
+    ('[UiPath].[dbo].[jobs]',                'Id',    'CreationTime',          'State in (4, 5, 6)',  60,  '01:00:00', '05:00:00', 10000, false),
+    ('[UiPath].[dbo].[AuditLogs]',           'Id',    'ExecutionTime',         '1=1',                 180, '01:00:00', '05:00:00', 10000, true),
+    ('[UiPath].[dbo].[Tasks]',               'Id',    'DeletionTime',          'IsDeleted = 1',       60,  '01:00:00', '05:00:00', 10000, false),
+    ('[UiPath].[dbo].[Tasks]',               'Id',    'LastModificationTime',  'Status = 2',          60,  '01:00:00', '05:00:00', 10000, false),
+    ('[UiPath].[dbo].[Sessions]',            'Id',    'ReportingTime',         '1=1',                 180, '01:00:00', '05:00:00', 10000, true),
+    ('[UiPath].[dbo].[Ledger]',              'Id',    'CreationTime',          '1=1',                 180, '01:00:00', '05:00:00', 10000, false),
+    ('[UiPath].[dbo].[LedgerDeliveries]',    'Id',    'LastUpdatedTime',       '1=1',                 180, '01:00:00', '05:00:00', 10000, false),
+    ('[UiPath].[dbo].[CleanupLog]',          'LogID', 'ExecutionTime',         '1=1',                 30,  '01:00:00', '05:00:00',  5000, false);
 GO
 
 -- Create the cleanup stored procedure
@@ -38,57 +47,68 @@ CREATE PROCEDURE dbo.HourlyCleanupProcess
 AS
 BEGIN
     -- Cleanup process with error handling
-    DECLARE @TableName NVARCHAR(128), @DateTimeColumn NVARCHAR(128), @AdditionalQuery NVARCHAR(4000), @StartTime TIME, @EndTime TIME, @BatchSize INT, @DaysOld INT, @ForceCascade BOOLEAN;
+    DECLARE @TableName NVARCHAR(128), @IdColumn NVARCHAR(128), @DateTimeColumn NVARCHAR(128), @AdditionalQuery NVARCHAR(4000), @StartTime TIME, @EndTime TIME, @BatchSize INT, @DaysOld INT, @ForceCascade BOOLEAN;
 
     DECLARE @DeletedRows INT, @TotalDeletedRows INT, @CurrentTime TIME;
     DECLARE @DynamicSQL NVARCHAR(MAX), @ErrorMessage NVARCHAR(4000);
 
     DECLARE ConfigCursor CURSOR FOR
-        SELECT TableName, DateTimeColumn, AdditionalQuery, StartTime, EndTime, BatchSize, DaysOld, ForceCascade
+        SELECT TableName, IdColumn, DateTimeColumn, AdditionalQuery, StartTime, EndTime, BatchSize, DaysOld, ForceCascade
         FROM dbo.CleanupConfig;
 
     OPEN ConfigCursor;
 
-    FETCH NEXT FROM ConfigCursor INTO @TableName, @DateTimeColumn, @AdditionalQuery, @StartTime, @EndTime, @BatchSize, @DaysOld, @ForceCascade;
+    FETCH NEXT FROM ConfigCursor INTO @TableName, @IdColumn, @DateTimeColumn, @AdditionalQuery, @StartTime, @EndTime, @BatchSize, @DaysOld, @ForceCascade;
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
         BEGIN TRY
-            SET @DeletedRows = 1;
+            SET @DeletedRows = -1;
             SET @TotalDeletedRows = 0;
             SET @CurrentTime = CAST(GETDATE() AS TIME);
 
-            WHILE @CurrentTime >= @StartTime AND @CurrentTime <= @EndTime AND @DeletedRows > 0
+            WHILE @CurrentTime >= @StartTime AND @CurrentTime <= @EndTime AND @DeletedRows != 0
             BEGIN
-                SET @DynamicSQL = N'';
-                IF @ForceCascade
+                BEGIN TRANSACTION
+                -- get the IDs to be deleted
+                    SET @DynamicSQL += N'SELECT TOP ' + CAST(@BatchSize AS NVARCHAR(10)) + N' ' + CAST(@IdColumn AS NVARCHAR(10)) + N' AS IdToDelete INTO #TempDeletedIds FROM ' + QUOTENAME(@TableName) + N' WHERE ' + @AdditionalQuery + N' AND DATEDIFF(DAY, ' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE()) > ' + CAST(@DaysOld AS NVARCHAR(10));
+                    EXEC sp_executesql @DynamicSQL;
+                    SET @DeletedRows = @@ROWCOUNT;
+                    IF @DeletedRows > 0
                     BEGIN
-                    -- force on delete cascade
-                    SET @DynamicSQL += N'WITH DeleteCascade AS (' +
-                        N'    SELECT T.Name AS TableName, C.Name AS ColumnName' +
-                        N'    FROM sys.foreign_key_columns F' +
-                        N'    JOIN sys.tables T ON T.object_id = F.referenced_object_id' +
-                        N'    JOIN sys.columns C ON C.object_id = F.referenced_object_id AND C.column_id = F.referenced_column_id' +
-                        N'    WHERE OBJECT_NAME(F.parent_object_id) = ''' + @TableName + N''' UNION ALL' +
-                        N'    SELECT T.Name AS TableName, C.Name AS ColumnName' +
-                        N'    FROM DeleteCascade DC' +
-                        N'    JOIN sys.foreign_key_columns F ON F.referenced_object_id = OBJECT_ID(DC.TableName)' +
-                        N'    JOIN sys.tables T ON T.object_id = F.parent_object_id' +
-                        N'    JOIN sys.columns C ON C.object_id = F.parent_object_id AND C.column_id = F.parent_column_id' +
-                        N'    WHERE NOT EXISTS (' +
-                        N'        SELECT 1 FROM DeleteCascade WHERE TableName = T.Name AND ColumnName = C.Name' +
-                        N'    )' +
-                        N');';
+                        IF @ForceCascade
+                        BEGIN
+                            -- go one level deeper in the DB schema
+                            DECLARE @FKName NVARCHAR(255);
+                            DECLARE @FKTableName NVARCHAR(255);
+                            DECLARE @DynamicSQL NVARCHAR(MAX);
+
+                            DECLARE ReferenceCursor CURSOR FOR 
+                            SELECT FK.name AS FKName, PT.name AS FKTableName FROM sys.foreign_keys AS FK INNER JOIN sys.tables AS PT ON FK.parent_object_id = PT.object_id INNER JOIN sys.tables AS RT ON FK.referenced_object_id = RT.object_id
+                            WHERE RT.name = @TableName;
+
+                            OPEN ReferenceCursor;
+
+                            FETCH NEXT FROM ReferenceCursor INTO @FKName, @FKTableName;
+
+                            WHILE @@FETCH_STATUS = 0
+                            BEGIN
+                                SET @DynamicSQL = N'DELETE FROM ' + QUOTENAME(@FKTableName) + N' WHERE ' + QUOTENAME(@FKName) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
+                                EXEC sp_executesql @DynamicSQL;
+                                FETCH NEXT FROM ReferenceCursor INTO @FKName, @FKTableName;
+                            END;
+
+                            CLOSE ReferenceCursor;
+                            DEALLOCATE ReferenceCursor;
+                        END
+                        -- delete records
+                        SET @DynamicSQL += N'DELETE FROM ' + QUOTENAME(@TableName) + N' WHERE ' + CAST(@IdColumn AS NVARCHAR(10)) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
+                        EXEC sp_executesql @DynamicSQL;
                     END
-                SET @DynamicSQL += N'
-                    DELETE TOP (' + CAST(@BatchSize AS NVARCHAR(10)) + N') FROM ' + QUOTENAME(@TableName) + 
-                    N' WHERE ' + @AdditionalQuery + N' AND ' + QUOTENAME(@DateTimeColumn) + N' < DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE());';
-
-                EXEC sp_executesql @DynamicSQL;
-                SET @DeletedRows = @@ROWCOUNT;
-
+                    DROP TABLE #TempDeletedIds
+                COMMIT TRANSACTION
                 -- Wait for 5 seconds before running the next batch if at least 1 row was deleted
-                IF @DeletedRows  > 0
+                IF @DeletedRows > 0
                 BEGIN
                     SET @TotalDeletedRows = @TotalDeletedRows + @DeletedRows;
                     WAITFOR DELAY '00:00:05';
@@ -96,13 +116,13 @@ BEGIN
                 SET @CurrentTime = CAST(GETDATE() AS TIME);
             END
             IF @TotalDeletedRows > 0
-                INSERT INTO dbo.CleanupLog (TableName, DateTimeColumn, AdditionalQuery, DeletedRows, ExecutionTime, ErrorMessage) VALUES (@TableName, @DateTimeColumn, @AdditionalQuery, @TotalDeletedRows, GETDATE(), NULL);
+                INSERT INTO dbo.CleanupLog (TableName, DeletedRows, ExecutionTime, ErrorMessage) VALUES (@TableName, @TotalDeletedRows, GETDATE(), NULL);
 
         END TRY
         BEGIN CATCH
             -- Capture the error message and continue with the next iteration
             SET @ErrorMessage = ERROR_MESSAGE();
-            INSERT INTO dbo.CleanupLog (TableName, DateTimeColumn, AdditionalQuery, DeletedRows, ExecutionTime, ErrorMessage) VALUES (@TableName, @DateTimeColumn, @AdditionalQuery, NULL, GETDATE(), @ErrorMessage);
+            INSERT INTO dbo.CleanupLog (TableName, DeletedRows, ExecutionTime, ErrorMessage) VALUES (@TableName, NULL, GETDATE(), @ErrorMessage);
             PRINT 'Error while processing table ' + QUOTENAME(@TableName) + ': ' + @ErrorMessage;
         END CATCH;
 
