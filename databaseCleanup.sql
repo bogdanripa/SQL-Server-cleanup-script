@@ -1,5 +1,3 @@
-DECLARE @DatabaseName NVARCHAR(128) = DB_NAME();
-
 -- Create cleanup table config
 CREATE TABLE dbo.CleanupConfig (
     TableName NVARCHAR(128),
@@ -153,10 +151,6 @@ BEGIN
 END;
 GO
 
--- switch to the msdb database
-USE msdb;
-GO
-
 -- create the 'HourlyCleanup' job to be called every hour
 EXEC msdb.dbo.sp_add_job
     @job_name = N'HourlyCleanup',
@@ -164,8 +158,9 @@ EXEC msdb.dbo.sp_add_job
     @description = 'Clean up the database of old records'
 GO
 
+DECLARE @DatabaseName NVARCHAR(128) = DB_NAME();
 -- create a cleanup job step (one is required)
-EXEC sp_add_jobstep
+EXEC msdb.dbo.sp_add_jobstep
     @job_name = N'HourlyCleanup',
     @step_name = N'HourlyCleanupOfOldRows',
     @step_id = 1,
@@ -186,7 +181,7 @@ EXEC dbo.HourlyCleanupProcess
 GO
 
 -- create the hourly schedule
-EXEC sp_add_jobschedule
+EXEC msdb.dbo.sp_add_jobschedule
     @job_name = N'HourlyCleanup',
     @name = N'Cleanup Every Hour',
     @enabled = 1,
