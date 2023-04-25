@@ -8,7 +8,8 @@ CREATE TABLE dbo.CleanupConfig (
     StartTime TIME NOT NULL,
     EndTime TIME NOT NULL,
     BatchSize INT NOT NULL CHECK (BatchSize > 0),
-    ForceCascade BIT DEFAULT 1
+    ForceCascade BIT DEFAULT 1,
+    ShouldBackup BIT DEFAULT 1
 );
 
 -- Create cleanup table log
@@ -21,21 +22,79 @@ CREATE TABLE dbo.CleanupLog (
 );
 
 -- Insert a sample row into the CleanupConfig table
-INSERT INTO dbo.CleanupConfig (TableName, IdColumn, DateTimeColumn, AdditionalQuery, DaysOld, StartTime, EndTime, BatchSize, ForceCascade)
+INSERT INTO dbo.CleanupConfig (TableName, IdColumn, DateTimeColumn, AdditionalQuery, DaysOld, StartTime, EndTime, BatchSize, ForceCascade, ShouldBackup)
 VALUES
-    ('[dbo].[QueueItems]',          'Id',    'CreationTime',          'status=3',            60,  '01:00:00', '05:00:00',  1000, 1),
-    ('[dbo].[Logs]',                'Id',    'TimeStamp',             '1=1',                 180, '01:00:00', '05:00:00', 10000, 0),
-    ('[dbo].[RobotLicenseLogs]',    'Id',    'EndDate',               'EndDate is not null', 60,  '01:00:00', '05:00:00', 10000, 0),
-    ('[dbo].[TenantNotifications]', 'Id',    'CreationTime',          '1=1',                 60,  '01:00:00', '05:00:00', 10000, 1),
-    ('[dbo].[jobs]',                'Id',    'CreationTime',          'State in (4, 5, 6)',  60,  '01:00:00', '05:00:00', 10000, 0),
-    ('[dbo].[AuditLogs]',           'Id',    'ExecutionTime',         '1=1',                 180, '01:00:00', '05:00:00', 10000, 1),
-    ('[dbo].[Tasks]',               'Id',    'DeletionTime',          'IsDeleted = 1',       60,  '01:00:00', '05:00:00', 10000, 0),
-    ('[dbo].[Tasks]',               'Id',    'LastModificationTime',  'Status = 2',          60,  '01:00:00', '05:00:00', 10000, 0),
-    ('[dbo].[Sessions]',            'Id',    'ReportingTime',         '1=1',                 180, '01:00:00', '05:00:00', 10000, 1),
-    ('[dbo].[Ledger]',              'Id',    'CreationTime',          '1=1',                 180, '01:00:00', '05:00:00', 10000, 0),
-    ('[dbo].[LedgerDeliveries]',    'Id',    'LastUpdatedTime',       '1=1',                 180, '01:00:00', '05:00:00', 10000, 0),
-    ('[dbo].[CleanupLog]',          'LogID', 'ExecutionTime',         '1=1',                 30,  '01:00:00', '05:00:00',  5000, 0);
+    ('QueueItems',          'Id',    'CreationTime',          'status=3',            60,  '01:00:00', '05:00:00',  1000, 1, 1),
+    ('Logs',                'Id',    'TimeStamp',             '1=1',                 180, '01:00:00', '05:00:00', 10000, 0, 1),
+    ('RobotLicenseLogs',    'Id',    'EndDate',               'EndDate is not null', 60,  '01:00:00', '05:00:00', 10000, 0, 1),
+    ('TenantNotifications', 'Id',    'CreationTime',          '1=1',                 60,  '01:00:00', '05:00:00', 10000, 1, 0),
+    ('jobs',                'Id',    'CreationTime',          'State in (4, 5, 6)',  60,  '01:00:00', '05:00:00', 10000, 0, 1),
+    ('AuditLogs',           'Id',    'ExecutionTime',         '1=1',                 180, '01:00:00', '05:00:00', 10000, 1, 1),
+    ('Tasks',               'Id',    'DeletionTime',          'IsDeleted = 1',       60,  '01:00:00', '05:00:00', 10000, 0, 1),
+    ('Tasks',               'Id',    'LastModificationTime',  'Status = 2',          60,  '01:00:00', '05:00:00', 10000, 0, 1),
+    ('Sessions',            'Id',    'ReportingTime',         '1=1',                 180, '01:00:00', '05:00:00', 10000, 1, 0),
+    ('Ledger',              'Id',    'CreationTime',          '1=1',                 180, '01:00:00', '05:00:00', 10000, 0, 0),
+    ('LedgerDeliveries',    'Id',    'LastUpdatedTime',       '1=1',                 180, '01:00:00', '05:00:00', 10000, 0, 0),
+    ('CleanupLog',          'LogID', 'ExecutionTime',         '1=1',                 30,  '01:00:00', '05:00:00',  5000, 0, 1);
 GO
+
+
+CREATE PROCEDURE dbo.GetArchivedTableName
+    @TableName NVARCHAR(128),
+    @Output NVARCHAR(128) OUTPUT
+AS
+BEGIN
+    DECLARE @ColumnNames NVARCHAR(MAX);
+    DECLARE @Hash NVARCHAR(64);
+    DECLARE @TenCharHash NVARCHAR(10);
+
+    -- Concatenate column names
+    SELECT @ColumnNames = COALESCE(@ColumnNames + ', ', '') + QUOTENAME(c.name)
+    FROM sys.columns c
+    JOIN sys.tables t ON c.object_id = t.object_id
+    WHERE t.name = @TableName;
+
+    -- Generate a SHA-256 hash
+    SET @Hash = CONVERT(NVARCHAR(64), HASHBYTES('SHA2_256', @ColumnNames), 2);
+
+    -- Take the first 10 characters of the hash
+    SET @TenCharHash = SUBSTRING(@Hash, 1, 10);
+
+    -- Prepend the table name
+    SET @Output = @TableName + '_' + @TenCharHash;
+END;
+GO
+
+CREATE PROCEDURE dbo.CreateArchiveDatabaseAndTables
+    @TableName NVARCHAR(128),
+    @Output NVARCHAR(128) OUTPUT
+AS
+BEGIN
+    -- create the archives database if it does not exist
+    IF NOT EXISTS (
+        SELECT 1
+        FROM sys.databases
+        WHERE name = 'Archives'
+    )
+    BEGIN
+        CREATE DATABASE Archives;
+    END
+
+    DECLARE @ArchivedTableName NVARCHAR(128);
+    EXEC dbo.GetArchivedTableName @TableName = @TableName, @Output = @ArchivedTableName OUTPUT;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM Archives.sys.tables
+        WHERE name = @ArchivedTableName
+    )
+    BEGIN
+        -- The table does not exist
+        DECLARE @DynamicSQL NVARCHAR(MAX) = 'select * into [Archives].'+@ArchivedTableName+'] from '+@TableName+' where 1=2';
+        print @DynamicSQL
+        EXEC sp_executesql @DynamicSQL;
+    END;
+    SET @Output = @ArchivedTableName;
+END;
 
 -- Create the cleanup stored procedure
 CREATE PROCEDURE dbo.HourlyCleanupProcess
@@ -45,18 +104,18 @@ BEGIN
     IF OBJECT_ID('#TempDeletedIds', 'U') IS NULL
         CREATE TABLE #TempDeletedIds (IdToDelete INT);
 
-    DECLARE @TableName NVARCHAR(128), @IdColumn NVARCHAR(128), @DateTimeColumn NVARCHAR(128), @AdditionalQuery NVARCHAR(4000), @StartTime TIME, @EndTime TIME, @BatchSize INT, @DaysOld INT, @ForceCascade BIT;
+    DECLARE @TableName NVARCHAR(128), @IdColumn NVARCHAR(128), @DateTimeColumn NVARCHAR(128), @AdditionalQuery NVARCHAR(4000), @StartTime TIME, @EndTime TIME, @BatchSize INT, @DaysOld INT, @ForceCascade BIT, @ShouldBackup BIT;
 
     DECLARE @DeletedRows INT, @TotalDeletedRows INT, @CurrentTime TIME;
     DECLARE @DynamicSQL NVARCHAR(MAX), @ErrorMessage NVARCHAR(4000);
 
     DECLARE ConfigCursor CURSOR LOCAL FOR
-        SELECT TableName, IdColumn, DateTimeColumn, AdditionalQuery, StartTime, EndTime, BatchSize, DaysOld, ForceCascade
+        SELECT TableName, IdColumn, DateTimeColumn, AdditionalQuery, StartTime, EndTime, BatchSize, DaysOld, ForceCascade, ShouldBackup
         FROM dbo.CleanupConfig;
 
     OPEN ConfigCursor;
 
-    FETCH NEXT FROM ConfigCursor INTO @TableName, @IdColumn, @DateTimeColumn, @AdditionalQuery, @StartTime, @EndTime, @BatchSize, @DaysOld, @ForceCascade;
+    FETCH NEXT FROM ConfigCursor INTO @TableName, @IdColumn, @DateTimeColumn, @AdditionalQuery, @StartTime, @EndTime, @BatchSize, @DaysOld, @ForceCascade, @ShouldBackup;
 
     -- for each row in the CleanupConfig table
     WHILE @@FETCH_STATUS = 0
@@ -72,7 +131,7 @@ BEGIN
                 BEGIN TRANSACTION
                     -- get the IDs to be deleted
                     DELETE from #TempDeletedIds;
-                    SET @DynamicSQL = N'INSERT INTO #TempDeletedIds SELECT TOP ' + CAST(@BatchSize AS NVARCHAR(10)) + N' ' + CAST(@IdColumn AS NVARCHAR(10)) + N' AS IdToDelete FROM ' + (@TableName) + N' WHERE ' + @AdditionalQuery + N' AND DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE()) > ' + CAST(@DateTimeColumn AS NVARCHAR(128));
+                    SET @DynamicSQL = N'INSERT INTO #TempDeletedIds SELECT TOP ' + CAST(@BatchSize AS NVARCHAR(10)) + N' ' + @IdColumn  + N' AS IdToDelete FROM ' + (@TableName) + N' WHERE ' + @AdditionalQuery + N' AND DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE()) > ' + CAST(@DateTimeColumn AS NVARCHAR(128));
                     print @DynamicSQL
                     EXEC sp_executesql @DynamicSQL;
                     SET @DeletedRows = @@ROWCOUNT;
@@ -85,6 +144,7 @@ BEGIN
                             -- go one level deeper in the DB schema
                             DECLARE @FKName NVARCHAR(255);
                             DECLARE @FKTableName NVARCHAR(255);
+                            DECLARE @ArchivedTableName NVARCHAR(128);
 
                             DECLARE ReferenceCursor CURSOR LOCAL FOR 
                             SELECT c_parent.name AS FKName, t_parent.name AS FKTableName FROM
@@ -106,6 +166,15 @@ BEGIN
 
                             WHILE @@FETCH_STATUS = 0
                             BEGIN
+                                if @ShouldBackup = 1
+                                BEGIN
+                                    -- backup
+                                    EXEC dbo.CreateArchiveDatabaseAndTables @TableName = @FKTableName, @Output = @ArchivedTableName OUTPUT;
+                                    SET @DynamicSQL = 'INSERT INTO [Archives].'+@ArchivedTableName+'] SELECT * FROM '+@FKTableName+' WHERE ' + (@FKName) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
+                                    print @DynamicSQL
+                                    EXEC sp_executesql @DynamicSQL;
+                                END;
+
                                 -- delete from tables following FKs
                                 SET @DynamicSQL = N'DELETE FROM ' + (@FKTableName) + N' WHERE ' + (@FKName) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
                                 print @DynamicSQL
@@ -116,8 +185,17 @@ BEGIN
                             CLOSE ReferenceCursor;
                             DEALLOCATE ReferenceCursor;
                         END
+                        if @ShouldBackup = 1
+                        BEGIN
+                            -- backup
+                            EXEC dbo.CreateArchiveDatabaseAndTables @TableName = @TableName, @Output = @ArchivedTableName OUTPUT;
+                            SET @DynamicSQL = 'INSERT INTO [Archives].'+@ArchivedTableName+'] SELECT * FROM ' + @TableName + ' WHERE ' + @IdColumn + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
+                            print @DynamicSQL
+                            EXEC sp_executesql @DynamicSQL;
+                        END;
+
                         -- delete records
-                        SET @DynamicSQL = N'DELETE FROM ' + (@TableName) + N' WHERE ' + CAST(@IdColumn AS NVARCHAR(10)) + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
+                        SET @DynamicSQL = N'DELETE FROM ' + (@TableName) + N' WHERE ' + @IdColumn + N' IN (SELECT IdToDelete FROM #TempDeletedIds)';
                         print @DynamicSQL
                         EXEC sp_executesql @DynamicSQL;
                     END
@@ -142,7 +220,8 @@ BEGIN
             PRINT 'Error while processing table ' + (@TableName) + ': ' + @ErrorMessage;
         END CATCH;
 
-        FETCH NEXT FROM ConfigCursor INTO @TableName, @IdColumn, @DateTimeColumn, @AdditionalQuery, @StartTime, @EndTime, @BatchSize, @DaysOld, @ForceCascade;
+        FETCH NEXT FROM ConfigCursor INTO @TableName, @IdColumn, @DateTimeColumn, @AdditionalQuery, @StartTime, @EndTime, @BatchSize, @DaysOld, @ForceCascade, @ShouldBackup;
+
     END
 
     CLOSE ConfigCursor;
