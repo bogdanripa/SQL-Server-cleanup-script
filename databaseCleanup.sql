@@ -1,3 +1,26 @@
+-- clean up everything (used for resetting the whole thing)
+DECLARE @JobID UNIQUEIDENTIFIER;
+DECLARE @ScheduleID INT;
+-- Get the job ID
+SELECT @JobID = job_id FROM msdb.dbo.sysjobs WHERE name = 'HourlyCleanup';
+-- Get the schedule ID
+SELECT @ScheduleID = schedule_id FROM msdb.dbo.sysschedules WHERE name = 'HourlyCleanup';
+-- Detach the schedule from the job
+EXEC msdb.dbo.sp_detach_schedule @job_id = @JobID, @schedule_id = @ScheduleID;
+-- Delete the schedule
+EXEC msdb.dbo.sp_delete_schedule @schedule_id = @ScheduleID;
+-- delete the job and its steps
+EXEC msdb.dbo.sp_delete_job @job_name = 'HourlyCleanup';
+-- drop all procedures, tables, databases
+DROP PROCEDURE HourlyCleanupProcess
+DROP PROCEDURE dbo.CreateArchiveDatabaseAndTables
+DROP PROCEDURE dbo.GetArchivedTableName;
+DROP TABLE dbo.CleanupConfig
+DROP TABLE dbo.CleanupLog
+DROP DATABASE Archives
+
+--------------------------------------------------------------------------------------------------------------
+
 -- Create cleanup table config
 CREATE TABLE dbo.CleanupConfig (
     TableName NVARCHAR(128),
@@ -241,7 +264,7 @@ DECLARE @DatabaseName NVARCHAR(128) = DB_NAME();
 -- create a cleanup job step (one is required)
 EXEC msdb.dbo.sp_add_jobstep
     @job_name = N'HourlyCleanup',
-    @step_name = N'HourlyCleanupOfOldRows',
+    @step_name = N'HourlyCleanup',
     @step_id = 1,
     @cmdexec_success_code = 0,
     @on_success_action = 1,
@@ -262,7 +285,7 @@ GO
 -- create the hourly schedule
 EXEC msdb.dbo.sp_add_jobschedule
     @job_name = N'HourlyCleanup',
-    @name = N'Cleanup Every Hour',
+    @name = N'HourlyCleanup',
     @enabled = 1,
     @freq_type = 4, -- Daily
     @freq_interval = 1,
