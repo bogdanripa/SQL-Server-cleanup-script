@@ -153,7 +153,7 @@ BEGIN
             BEGIN
                 BEGIN TRANSACTION
                     -- get the IDs to be deleted
-                    DELETE from #TempDeletedIds;
+                    TRUNCATE TABLE #TempDeletedIds;
                     SET @DynamicSQL = N'INSERT INTO #TempDeletedIds SELECT TOP ' + CAST(@BatchSize AS NVARCHAR(10)) + N' ' + @IdColumn  + N' AS IdToDelete FROM ' + (@TableName) + N' WHERE ' + @AdditionalQuery + N' AND DATEADD(DAY, -' + CAST(@DaysOld AS NVARCHAR(10)) + N', GETDATE()) > ' + CAST(@DateTimeColumn AS NVARCHAR(128));
                     print @DynamicSQL
                     EXEC sp_executesql @DynamicSQL;
